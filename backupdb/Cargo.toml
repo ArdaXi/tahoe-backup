@@ -1,0 +1,10 @@
+[package]
+name = "backupdb"
+version = "0.1.0"
+authors = ["Arda Xi <arda@ardaxi.com>"]
+
+[dependencies]
+diesel = { version = "1.1", features = ["sqlite"] }
+diesel_migrations = "1.1"
+dotenv = "0.11.0"
+error-chain = "0.11.0"

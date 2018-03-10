@@ -1,0 +1,17 @@
+[package]
+name = "tahoe-backup"
+version = "0.1.0"
+authors = ["Arda Xi <arda@ardaxi.com>"]
+
+[dependencies]
+futures = "0.1.18"
+tahoe = { path = "tahoe" }
+backupdb = { path = "backupdb" }
+error-chain = "0.11.0"
+tokio-core = "0.1.12"
+log = "0.4"
+env_logger = "0.5"
+filetime = "0.1"
+clap = "2.31"
+
+[workspace]

@@ -3,6 +3,7 @@ extern crate chrono;
 extern crate env_logger;
 extern crate filetime;
 extern crate futures;
+extern crate globset;
 extern crate tahoe;
 extern crate tokio_core;
 
@@ -39,6 +40,10 @@ mod errors {
                 description("Couldn't upload file"),
                 display("Couldn't upload file: '{}'", path),
             }
+            GlobParse(glob: String) {
+                description("Couldn't parse glob"),
+                display("Couldn't parse glob: '{}'", glob),
+            }
         }
     }
 }
@@ -63,6 +68,8 @@ use clap::Arg;
 
 use chrono::Utc;
 
+use globset::{Glob, GlobSet, GlobSetBuilder};
+
 fn ok_or_log<T, E>(res: std::result::Result<T, E>) -> Option<T>
 where
     E: Into<Error>,
@@ -77,6 +84,7 @@ where
 }
 
 fn upload<'a>(
+    globset: &'a Option<GlobSet>,
     client: &'a Tahoe,
     db: &'a BackupDB,
     path: String,
@@ -141,22 +149,33 @@ fn upload<'a>(
         let files = files.unwrap();
         let logpath = path.clone();
         return Box::new(
-            stream::iter_ok(files.filter_map(ok_or_log).map(move |entry| {
-                let path = entry.path().to_string_lossy().into_owned();
-                upload(client, db, path.clone(), entry.metadata()).map(move |f| {
-                    f.map(|res| {
-                        (
-                            entry
-                                .path()
-                                .file_name()
-                                .unwrap()
-                                .to_string_lossy()
-                                .into_owned(),
-                            DirNode::new(res, entry.metadata()),
-                        )
+            stream::iter_ok(
+                files
+                    .filter_map(ok_or_log)
+                    .filter(move |entry| {
+                        if let &Some(ref globs) = globset {
+                            !globs.is_match(entry.path())
+                        } else {
+                            true
+                        }
                     })
-                })
-            })).buffered(client.threads())
+                    .map(move |entry| {
+                        let path = entry.path().to_string_lossy().into_owned();
+                        upload(globset, client, db, path.clone(), entry.metadata()).map(move |f| {
+                            f.map(|res| {
+                                (
+                                    entry
+                                        .path()
+                                        .file_name()
+                                        .unwrap()
+                                        .to_string_lossy()
+                                        .into_owned(),
+                                    DirNode::new(res, entry.metadata()),
+                                )
+                            })
+                        })
+                    }),
+            ).buffered(client.threads())
                 .filter_map(ok_or_log)
                 .collect()
                 .inspect(move |_| info!("Uploading dir '{}'", path))
@@ -204,7 +223,15 @@ where
     }
 }
 
-fn main() {
+fn build_globset<'a, I: Iterator<Item = &'a str>>(iter: I) -> Result<GlobSet> {
+    let mut builder = GlobSetBuilder::new();
+    for item in iter {
+        builder.add(Glob::new(item).chain_err(|| ErrorKind::GlobParse(String::from(item)))?);
+    }
+    builder.build().chain_err(|| "Failed to build globset")
+}
+
+fn run() -> Result<()> {
     env_logger::init();
     let mut default_database = env::home_dir().unwrap_or_else(PathBuf::new);
     default_database.push(".tahoe/private/rust-backupdb.sqlite");
@@ -226,6 +253,14 @@ fn main() {
                 .takes_value(true),
         )
         .arg(
+            Arg::with_name("exclude")
+                .short("x")
+                .long("exclude")
+                .help("Ignore files matching a glob pattern")
+                .multiple(true)
+                .takes_value(true),
+        )
+        .arg(
             Arg::with_name("path")
                 .help("The folder to backup")
                 .required(true),
@@ -237,13 +272,19 @@ fn main() {
         )
         .get_matches();
     let threads: usize = matches.value_of("threads").unwrap().parse().unwrap_or(4);
-    let path = fs::canonicalize(matches.value_of_os("path").unwrap()).unwrap();
+    let path =
+        fs::canonicalize(matches.value_of_os("path").unwrap()).chain_err(|| "Couldn't find path")?;
     let database = matches.value_of("database").unwrap();
     let target = matches.value_of("target").unwrap();
     let mut core = Core::new().unwrap();
     let client = Tahoe::new(threads, &core.handle(), None).unwrap();
     let db = BackupDB::new(database).unwrap();
+    let globset = match matches.values_of("exclude") {
+        Some(globs) => Some(build_globset(globs)?),
+        None => None,
+    };
     let work = upload(
+        &globset,
         &client,
         &db,
         path.to_string_lossy().into_owned(),
@@ -267,5 +308,9 @@ fn main() {
         })
     })
         .flatten();
-    core.run(work).map_err(log_err).ok();
+    core.run(work).map(|_| ())
+}
+
+fn main() {
+    run().map_err(log_err).ok();
 }

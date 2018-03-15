@@ -44,6 +44,10 @@ mod errors {
                 description("Couldn't parse glob"),
                 display("Couldn't parse glob: '{}'", glob),
             }
+            UnknownFile(path: String) {
+                description("Unexpected file"),
+                display("Unexpected file: '{}'", path),
+            }
         }
     }
 }
@@ -184,7 +188,7 @@ fn upload<'a>(
         );
     }
 
-    Box::new(future::err("Unexpected file".into()))
+    Box::new(future::ok(Err(ErrorKind::UnknownFile(path).into())))
 }
 
 fn upload_dir<'a>(

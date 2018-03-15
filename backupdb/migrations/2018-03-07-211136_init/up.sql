@@ -28,7 +28,7 @@ CREATE TABLE last_upload
 
 CREATE TABLE directories
 (
- dirhash varchar(256) PRIMARY KEY NOT NULL,
+ dirhash integer PRIMARY KEY NOT NULL,
  dircap varchar(256) NOT NULL,
  last_uploaded TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );

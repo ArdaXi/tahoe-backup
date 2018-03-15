@@ -25,6 +25,24 @@ impl BackupDB {
             .map(|connection| BackupDB { connection })
     }
 
+    pub fn check_dir(&self, hash: i64) -> Option<String> {
+        use schema::directories::dsl::*;
+        directories
+            .find(hash)
+            .select(dircap)
+            .first(&self.connection)
+            .ok()
+    }
+
+    pub fn add_dir(&self, hash: i64, cap: &str) -> Result<()> {
+        use schema::directories::dsl::*;
+        insert_into(directories)
+            .values((dirhash.eq(hash), dircap.eq(cap)))
+            .execute(&self.connection)
+            .chain_err(|| "Failed to upload dir")
+            .map(|_| ())
+    }
+
     pub fn check_file(&self, path: &str, size: i64, ctime: i64, mtime: i64) -> Option<String> {
         use schema::local_files::all_columns;
         use schema::local_files::dsl::local_files;

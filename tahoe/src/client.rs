@@ -4,6 +4,9 @@ use std::io::Read;
 use std::fs::{File, Metadata};
 use std::collections::HashMap;
 use std::time::UNIX_EPOCH;
+use std::result;
+use std::iter::FromIterator;
+use std::hash::Hasher;
 
 use tokio_core::reactor;
 
@@ -12,9 +15,13 @@ use hyper::{Body, Chunk, Method, Uri};
 
 use futures::{Future, Sink, Stream};
 
+use serde::{Serialize, Serializer};
+use serde::ser::SerializeMap;
 use serde_json;
 
 use threadpool::ThreadPool;
+
+use seahash::SeaHasher;
 
 use errors::*;
 
@@ -30,6 +37,54 @@ pub enum NodeType {
     Dir,
     #[serde(rename = "filenode")]
     File,
+}
+
+pub struct Dir {
+    inner: Vec<(String, DirNode)>,
+    hasher: SeaHasher,
+}
+
+impl Dir {
+    fn new() -> Self {
+        Dir {
+            inner: Vec::new(),
+            hasher: SeaHasher::new(),
+        }
+    }
+
+    fn push(&mut self, value: (String, DirNode)) {
+        self.hasher.write(value.0.as_bytes());
+        self.hasher.write(value.1.uri().as_bytes());
+        self.inner.push(value)
+    }
+
+    pub fn hash(&self) -> u64 {
+        self.hasher.finish()
+    }
+}
+
+impl Serialize for Dir {
+    fn serialize<S>(&self, serializer: S) -> result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut map = serializer.serialize_map(Some(self.inner.len()))?;
+        for &(ref k, ref v) in &self.inner {
+            map.serialize_entry(&k, &v)?;
+        }
+        map.end()
+    }
+}
+
+impl FromIterator<(String, DirNode)> for Dir {
+    fn from_iter<I: IntoIterator<Item = (String, DirNode)>>(iter: I) -> Self {
+        let mut dir = Dir::new();
+        for item in iter {
+            dir.push(item);
+        }
+
+        dir
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -57,9 +112,11 @@ impl DirNode {
         }
         DirNode(nodetype, DirNodeInner { ro_uri, metadata })
     }
-}
 
-pub type Dir = HashMap<String, DirNode>;
+    fn uri(&self) -> &str {
+        &self.1.ro_uri
+    }
+}
 
 #[derive(Clone)]
 pub struct Tahoe {

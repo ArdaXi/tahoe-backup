@@ -50,7 +50,7 @@ use tokio_core::reactor::Core;
 
 use futures::{future, stream, Future, IntoFuture, Stream};
 
-use tahoe::client::{DirNode, Tahoe};
+use tahoe::client::{Dir, DirNode, Tahoe};
 
 use backupdb::BackupDB;
 
@@ -142,25 +142,43 @@ fn upload<'a>(
                 let path = entry.path().to_string_lossy().into_owned();
                 upload(client, db, path.clone(), entry.metadata())
                     .map(move |f| f.map(|res| (path, DirNode::new(res, entry.metadata()))))
-            })).buffer_unordered(client.threads())
+            })).buffered(client.threads())
                 .filter_map(ok_or_log)
                 .collect()
                 .inspect(move |_| info!("Uploading dir '{}'", path))
                 .map(|v| v.iter().cloned().collect())
-                .and_then(move |dir| {
-                    client
-                        .upload_dir(&dir)
-                        .chain_err(|| "couldn't upload dir")
-                        .into_future()
-                        .map(|f| f.inspect(move |cap| info!("'{}' -> '{}'", logpath, cap)))
-                        .map(|f| f.map(Ok))
-                        .map(|f| f.map_err(|e| Error::with_chain(e, "failed to upload dir")))
-                })
-                .flatten(),
+                .and_then(move |dir| upload_dir(client, db, dir, logpath)),
         );
     }
 
     Box::new(future::err("Unexpected file".into()))
+}
+
+fn upload_dir<'a>(
+    client: &'a Tahoe,
+    db: &'a BackupDB,
+    dir: Dir,
+    path: String,
+) -> Box<Future<Item = Result<String>, Error = Error> + 'a> {
+    let hash = dir.hash() as i64;
+    match db.check_dir(hash) {
+        Some(cap) => {
+            info!("Reusing directory '{}'", path);
+            Box::new(future::ok(Ok(cap)))
+        }
+        None => Box::new(
+            client
+                .upload_dir(&dir)
+                .into_future()
+                .flatten()
+                .inspect(move |cap| {
+                    ok_or_log(db.add_dir(hash, &cap));
+                    info!("'{}' -> '{}'", path, cap)
+                })
+                .map(Ok)
+                .map_err(|e| Error::with_chain(e, "couldn't upload dir")),
+        ),
+    }
 }
 
 fn log_err<E>(err: E)

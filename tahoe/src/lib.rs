@@ -1,6 +1,7 @@
 #![feature(conservative_impl_trait)]
 extern crate futures;
 extern crate hyper;
+extern crate seahash;
 extern crate serde;
 extern crate serde_json;
 extern crate threadpool;

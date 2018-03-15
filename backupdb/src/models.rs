@@ -9,10 +9,11 @@ pub struct Cap {
     pub filecap: String,
 }
 
-#[derive(Queryable)]
+#[derive(Insertable)]
+#[table_name = "directories"]
 #[primary_key(dirhash)]
 pub struct Directory {
-    pub dirhash: String,
+    pub dirhash: i64,
     pub dircap: String,
     pub last_uploaded: SystemTime,
 }

@@ -7,7 +7,7 @@ table! {
 
 table! {
     directories (dirhash) {
-        dirhash -> Text,
+        dirhash -> BigInt,
         dircap -> Text,
         last_uploaded -> Nullable<Timestamp>,
     }

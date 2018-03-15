@@ -122,6 +122,7 @@ impl DirNode {
 pub struct Tahoe {
     client: Client<HttpConnector>,
     pool: ThreadPool,
+    base: String,
     file_uri: Uri,
     dir_uri: Uri,
 }
@@ -140,6 +141,7 @@ impl Tahoe {
         Ok(Tahoe {
             client,
             pool,
+            base: base_str.clone(),
             file_uri,
             dir_uri,
         })
@@ -147,6 +149,31 @@ impl Tahoe {
 
     pub fn threads(&self) -> usize {
         self.pool.max_count()
+    }
+
+    pub fn attach(
+        &self,
+        dircap: &str,
+        path: &str,
+        filecap: &str,
+    ) -> Result<impl Future<Item = (), Error = Error>> {
+        let body: Body = String::from(filecap).into();
+        let uri = Uri::from_str(&format!("{}/{}/{}?t=uri", self.base, dircap, path))
+            .chain_err(|| "failed to form url")?;
+
+        let mut request = Request::new(Method::Put, uri);
+        request.set_body(body);
+
+        Ok(self.client
+            .request(request)
+            .map_err(upload_err)
+            .and_then(|res| {
+                if res.status().is_success() {
+                    Ok(())
+                } else {
+                    bail!(ErrorKind::Tahoe(res.status()))
+                }
+            }))
     }
 
     pub fn upload_dir(&self, dir: &Dir) -> Result<impl Future<Item = String, Error = Error>> {

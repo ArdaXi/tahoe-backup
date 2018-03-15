@@ -1,4 +1,5 @@
 extern crate backupdb;
+extern crate chrono;
 extern crate env_logger;
 extern crate filetime;
 extern crate futures;
@@ -59,6 +60,8 @@ use errors::*;
 use filetime::FileTime;
 
 use clap::Arg;
+
+use chrono::Utc;
 
 fn ok_or_log<T, E>(res: std::result::Result<T, E>) -> Option<T>
 where
@@ -140,8 +143,19 @@ fn upload<'a>(
         return Box::new(
             stream::iter_ok(files.filter_map(ok_or_log).map(move |entry| {
                 let path = entry.path().to_string_lossy().into_owned();
-                upload(client, db, path.clone(), entry.metadata())
-                    .map(move |f| f.map(|res| (path, DirNode::new(res, entry.metadata()))))
+                upload(client, db, path.clone(), entry.metadata()).map(move |f| {
+                    f.map(|res| {
+                        (
+                            entry
+                                .path()
+                                .file_name()
+                                .unwrap()
+                                .to_string_lossy()
+                                .into_owned(),
+                            DirNode::new(res, entry.metadata()),
+                        )
+                    })
+                })
             })).buffered(client.threads())
                 .filter_map(ok_or_log)
                 .collect()
@@ -216,22 +230,42 @@ fn main() {
                 .help("The folder to backup")
                 .required(true),
         )
+        .arg(
+            Arg::with_name("target")
+                .help("The capability to upload into")
+                .required(true),
+        )
         .get_matches();
     let threads: usize = matches.value_of("threads").unwrap().parse().unwrap_or(4);
     let path = fs::canonicalize(matches.value_of_os("path").unwrap()).unwrap();
     let database = matches.value_of("database").unwrap();
+    let target = matches.value_of("target").unwrap();
     let mut core = Core::new().unwrap();
     let client = Tahoe::new(threads, &core.handle(), None).unwrap();
     let db = BackupDB::new(database).unwrap();
-    let cap = upload(
+    let work = upload(
         &client,
         &db,
         path.to_string_lossy().into_owned(),
         fs::symlink_metadata(path),
-    );
-    let res = match core.run(cap) {
-        Ok(Ok(x)) => x,
-        Ok(Err(e)) | Err(e) => return log_err(e),
-    };
-    println!("{}", res);
+    ).and_then(|res| {
+        res.map(|cap| {
+            let datetime = format!("Archives/{}", Utc::now().to_rfc3339());
+            info!("Adding link 'Latest' and '{}'", datetime);
+            client
+                .attach(target, &datetime, &cap)
+                .unwrap()
+                .map_err(|e| Error::with_chain(e, "failed to attach archive"))
+                .inspect(|_| info!("Added Archives link"))
+                .join(
+                    client
+                        .attach(target, "Latest", &cap)
+                        .unwrap()
+                        .map_err(|e| Error::with_chain(e, "failed to attach archive"))
+                        .inspect(|_| info!("Added Latest link")),
+                )
+        })
+    })
+        .flatten();
+    core.run(work).map_err(log_err).ok();
 }

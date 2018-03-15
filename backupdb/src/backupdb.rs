@@ -39,7 +39,7 @@ impl BackupDB {
         insert_into(directories)
             .values((dirhash.eq(hash), dircap.eq(cap)))
             .execute(&self.connection)
-            .chain_err(|| "Failed to upload dir")
+            .chain_err(|| "Failed to add dir to db")
             .map(|_| ())
     }
 

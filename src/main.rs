@@ -4,6 +4,7 @@ extern crate env_logger;
 extern crate filetime;
 extern crate futures;
 extern crate globset;
+extern crate indicatif;
 extern crate tahoe;
 extern crate tokio_core;
 
@@ -55,6 +56,8 @@ mod errors {
 use std::{env, fs, io};
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::thread;
 
 use tokio_core::reactor::Core;
 
@@ -74,6 +77,8 @@ use chrono::Utc;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+
 fn ok_or_log<T, E>(res: std::result::Result<T, E>) -> Option<T>
 where
     E: Into<Error>,
@@ -87,7 +92,28 @@ where
     }
 }
 
+fn style() -> ProgressStyle {
+    ProgressStyle::default_bar()
+        .template(
+            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta}) {wide_msg}",
+        )
+        .progress_chars("#>-")
+}
+
+fn dir_style() -> ProgressStyle {
+    ProgressStyle::default_spinner().template("{spinner:.green} [{elapsed_precise}] {wide_msg}")
+}
+
+fn finished_style() -> ProgressStyle {
+    ProgressStyle::default_bar()
+        .template(
+            "{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {total_bytes} {wide_msg}",
+        )
+        .progress_chars("#>-")
+}
+
 fn upload<'a>(
+    progress: &'a MultiProgress,
     globset: &'a Option<GlobSet>,
     client: &'a Tahoe,
     db: &'a BackupDB,
@@ -110,13 +136,13 @@ fn upload<'a>(
     }
 
     if file_type.is_file() {
-        let size = metadata.len() as i64;
+        let size = metadata.len();
         let ctime = FileTime::from_creation_time(&metadata)
             .unwrap_or(FileTime::zero())
             .seconds() as i64;
         let mtime = FileTime::from_last_modification_time(&metadata).seconds() as i64;
 
-        if let Some(cap) = db.check_file(&path, size, ctime, mtime) {
+        if let Some(cap) = db.check_file(&path, size as i64, ctime, mtime) {
             info!("Skipping '{}'", path);
             return Box::new(future::ok(Ok(cap)));
         }
@@ -127,12 +153,18 @@ fn upload<'a>(
         };
         info!("Uploading file '{}'", &path);
         let logpath = path.clone();
+        let pb = Arc::new(progress.add(ProgressBar::new(size)));
+        pb.set_style(style());
+        pb.set_message(&path);
+        let pb2 = pb.clone();
         return Box::new(
             client
-                .upload_file(f)
+                .upload_file(f, move |n| pb2.inc(n as u64))
                 .inspect(move |cap| {
+                    pb.set_style(finished_style());
+                    pb.finish_and_clear();
                     info!("'{}' -> '{}'", &logpath, cap);
-                    ok_or_log(db.add_file(&cap, logpath, size, ctime, mtime));
+                    ok_or_log(db.add_file(&cap, logpath, size as i64, ctime, mtime));
                     ()
                 })
                 .map_err(move |e| Error::with_chain(e, ErrorKind::FileUpload(path)))
@@ -152,6 +184,10 @@ fn upload<'a>(
 
         let files = files.unwrap();
         let logpath = path.clone();
+        let pb = progress.add(ProgressBar::new_spinner());
+        pb.set_style(dir_style());
+        pb.set_message(&path);
+        pb.enable_steady_tick(100);
         return Box::new(
             stream::iter_ok(
                 files
@@ -165,7 +201,14 @@ fn upload<'a>(
                     })
                     .map(move |entry| {
                         let path = entry.path().to_string_lossy().into_owned();
-                        upload(globset, client, db, path.clone(), entry.metadata()).map(move |f| {
+                        upload(
+                            progress,
+                            globset,
+                            client,
+                            db,
+                            path.clone(),
+                            entry.metadata(),
+                        ).map(move |f| {
                             f.map(|res| {
                                 (
                                     entry
@@ -184,7 +227,7 @@ fn upload<'a>(
                 .collect()
                 .inspect(move |_| info!("Uploading dir '{}'", path))
                 .map(|v| v.iter().cloned().collect())
-                .and_then(move |dir| upload_dir(client, db, dir, logpath)),
+                .and_then(move |dir| upload_dir(pb, client, db, dir, logpath)),
         );
     }
 
@@ -192,6 +235,7 @@ fn upload<'a>(
 }
 
 fn upload_dir<'a>(
+    pb: ProgressBar,
     client: &'a Tahoe,
     db: &'a BackupDB,
     dir: Dir,
@@ -201,6 +245,7 @@ fn upload_dir<'a>(
     match db.check_dir(hash) {
         Some(cap) => {
             info!("Reusing directory '{}'", path);
+            pb.finish_and_clear();
             Box::new(future::ok(Ok(cap)))
         }
         None => Box::new(
@@ -210,6 +255,7 @@ fn upload_dir<'a>(
                 .flatten()
                 .inspect(move |cap| {
                     ok_or_log(db.add_dir(hash, &cap));
+                    pb.finish_and_clear();
                     info!("'{}' -> '{}'", path, cap)
                 })
                 .map(Ok)
@@ -287,7 +333,9 @@ fn run() -> Result<()> {
         Some(globs) => Some(build_globset(globs)?),
         None => None,
     };
+    let mp = Arc::new(MultiProgress::new());
     let work = upload(
+        &mp,
         &globset,
         &client,
         &db,
@@ -312,7 +360,12 @@ fn run() -> Result<()> {
         })
     })
         .flatten();
-    core.run(work).map(|_| ())
+    let bar = mp.add(ProgressBar::hidden());
+    let mp2 = mp.clone();
+    thread::spawn(move || mp2.join());
+    core.run(work)?;
+    bar.finish();
+    Ok(())
 }
 
 fn main() {

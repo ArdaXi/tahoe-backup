@@ -198,14 +198,21 @@ impl Tahoe {
             .and_then(|b| String::from_utf8(b.to_vec()).map_err(upload_err))) // TODO: Don't clone here
     }
 
-    pub fn upload_file(&self, mut file: File) -> impl Future<Item = String, Error = Error> {
+    pub fn upload_file<F: Fn(usize) -> ()>(
+        &self,
+        mut file: File,
+        progress: F,
+    ) -> impl Future<Item = String, Error = Error>
+    where
+        F: Send + 'static,
+    {
         let (tx, body) = Body::pair();
         let mut request = Request::new(Method::Put, self.file_uri.clone());
         request.set_body(body);
 
         self.pool.execute(move || {
             let mut tx_body = tx;
-            let mut buf = [0u8; 1024 * 1024];
+            let mut buf = [0u8; 1024];
 
             loop {
                 match file.read(&mut buf) {
@@ -220,6 +227,7 @@ impl Tahoe {
                         let chunk: Chunk = buf[0..n].to_vec().into();
                         match tx_body.send(Ok(chunk)).wait() {
                             Ok(t) => {
+                                (progress)(n);
                                 tx_body = t;
                             }
                             Err(_) => {

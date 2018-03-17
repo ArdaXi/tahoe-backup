@@ -15,5 +15,6 @@ filetime = "0.1"
 clap = "2.31"
 chrono = "0.4"
 globset = "0.3"
+indicatif = "0.9"
 
 [workspace]
